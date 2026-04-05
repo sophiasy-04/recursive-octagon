@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { margin: 0; padding: 0; background: black; overflow: hidden; }
+    #ui {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      color: white;
+      font-family: monospace;
+      font-size: 14px;
+      line-height: 2;
+      z-index: 10;
+    }
+    #ui input { width: 220px; display: block; margin-top: 4px; }
+  </style>
+</head>
+<body>
+
+<div id="ui">
+  r = <span id="r-display">0.611</span>
+  <input type="range" id="r-slider" min="0.3" max="0.95" step="0.001" value="0.611">
+  r_critical = 0.7654 &nbsp; status: <span id="status">—</span>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+<script>
+
+let vertices = [];
+let edges    = [];
+let restL    = [];
+let targetZ  = [];
+let currentZ = [];
+let transitioning = false;
+let autoAngle = 0;
+
+const N_SIDES  = 8;    // octagon
+const N_LAYERS = 12;   // 12 × 8 = 96 vertices
+const R_CRIT   = 0.7654;
+let   r        = 0.611;
+let   R0       = 220;  // outer circumradius — r slider scales this
+
+// ── line–line intersection ────────────────────────────────────────────────────
+function intersect(p1, p2, p3, p4) {
+  let d1x = p2.x - p1.x, d1y = p2.y - p1.y;
+  let d2x = p4.x - p3.x, d2y = p4.y - p3.y;
+  let denom = d1x * d2y - d1y * d2x;
+  if (Math.abs(denom) < 1e-10) return null;
+  let t = ((p3.x - p1.x) * d2y - (p3.y - p1.y) * d2x) / denom;
+  return { x: p1.x + t * d1x, y: p1.y + t * d1y };
+}
+
+// ── regular polygon vertices ──────────────────────────────────────────────────
+function polyVerts(R, rot) {
+  let v = [];
+  for (let i = 0; i < N_SIDES; i++) {
+    let a = (2 * Math.PI * i / N_SIDES) + rot;
+    v.push({ x: R * Math.cos(a), y: R * Math.sin(a) });
+  }
+  return v;
+}
+
+// ── build graph ───────────────────────────────────────────────────────────────
+//
+// Layer 0: outer octagon vertices, circumradius R0, no rotation.
+//
+// Layer k+1 vertices: intersection points of skip-1 chords at layer k.
+//   Chord i at layer k: pts[i] → pts[(i+2)%8]
+//   Chord i+1:          pts[(i+1)%8] → pts[(i+3)%8]
+//   Their intersection = layer k+1 vertex i.
+//
+// Edges — three types, giving exactly 272 total:
+//   Ring edges:  8 per layer × 12 layers = 96
+//   Left struts: 8 per transition × 11 transitions = 88
+//   Right struts:8 per transition × 11 transitions = 88
+//   Total: 96 + 88 + 88 = 272  ✓
+//
+// At each interior vertex (layers 1–10), edges meeting:
+//   2 ring edges (left and right on same layer)
+//   1 left strut up to layer above
+//   1 right strut up to layer above
+//   1 left strut down to layer below
+//   1 right strut down to layer below
+//   = 6 edges  ✓
+//
+// At outer vertices (layer 0):
+//   2 ring edges + 1 left strut + 1 right strut = 4 edges  ✓
+
+function generateGraph() {
+  vertices = [];
+  edges    = [];
+
+  // compute layer positions
+  let layerPts = [];
+  layerPts[0] = polyVerts(R0, 0);
+
+  for (let k = 0; k < N_LAYERS - 1; k++) {
+    let pts = layerPts[k];
+    let inner = [];
+    for (let i = 0; i < N_SIDES; i++) {
+      let p = intersect(
+        pts[i],                    pts[(i + 2) % N_SIDES],
+        pts[(i + 1) % N_SIDES],    pts[(i + 3) % N_SIDES]
+      );
+      if (!p) p = { x: 0, y: 0 };
+      inner.push(p);
+    }
+    layerPts[k + 1] = inner;
+  }
+
+  // vertex indices: idx[k][i]
+  let idx = [];
+  for (let k = 0; k < N_LAYERS; k++) {
+    idx[k] = [];
+    for (let i = 0; i < N_SIDES; i++) {
+      idx[k][i] = vertices.length;
+      vertices.push({ x: layerPts[k][i].x, y: layerPts[k][i].y, z: 0 });
+    }
+  }
+
+  // ring edges — connect adjacent vertices within each layer
+  for (let k = 0; k < N_LAYERS; k++) {
+    for (let i = 0; i < N_SIDES; i++) {
+      edges.push([idx[k][i], idx[k][(i + 1) % N_SIDES]]);
+    }
+  }
+
+  // strut edges — split each chord into left and right struts
+  // chord i at layer k: idx[k][i] → idx[k][(i+2)%8]
+  // is split at idx[k+1][(i-1+8)%8] and idx[k+1][i]
+  // left strut:  idx[k][i]              → idx[k+1][(i-1+8)%8]
+  // right strut: idx[k+1][i]            → idx[k][(i+2)%8]
+  for (let k = 0; k < N_LAYERS - 1; k++) {
+    for (let i = 0; i < N_SIDES; i++) {
+      edges.push([idx[k][i],  idx[k + 1][(i - 1 + N_SIDES) % N_SIDES]]);
+      edges.push([idx[k + 1][i],  idx[k][(i + 2) % N_SIDES]]);
+    }
+  }
+
+  console.log('vertices:', vertices.length, '  edges:', edges.length);
+  // should print: vertices: 96   edges: 272
+}
+
+// ── spring network embedding ──────────────────────────────────────────────────
+function computeEmbedding() {
+  for (let v of vertices) v.z = 0;
+
+  // pin outer octagon (layer 0, indices 0–7)
+  let pinned = new Set();
+  for (let i = 0; i < N_SIDES; i++) pinned.add(i);
+
+
+  // small random z nudge to escape the flat saddle point
+  for (let i = N_SIDES; i < vertices.length; i++) {
+    vertices[i].z = (Math.random() - 0.5) * 5;
+  }
+
+  // gradient descent
+  let lr    = 0.003;
+  let iters = 1500;
+
+  for (let it = 0; it < iters; it++) {
+    let g = new Array(vertices.length).fill(0);
+    for (let e = 0; e < edges.length; e++) {
+      let [i, j] = edges[e];
+      let dx = vertices[i].x - vertices[j].x;
+      let dy = vertices[i].y - vertices[j].y;
+      let dz = vertices[i].z - vertices[j].z;
+      let L  = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (L < 1e-6) continue;
+      let grad = 2 * (L - restL[e]) * dz / L;
+      g[i] += grad;
+      g[j] -= grad;
+    }
+    for (let i = 0; i < vertices.length; i++) {
+      if (!pinned.has(i)) vertices[i].z -= lr * g[i];
+    }
+  }
+}
+
+// ── p5 ────────────────────────────────────────────────────────────────────────
+function setup() {
+  createCanvas(windowWidth, windowHeight, WEBGL);
+
+  generateGraph();
+  restL = edges.map(([i, j]) => {
+  let dx = vertices[i].x - vertices[j].x;
+  let dy = vertices[i].y - vertices[j].y;
+  return Math.sqrt(dx * dx + dy * dy);
+});
+
+restL = restL.map(L => L * 0.98);
+  computeEmbedding();
+  currentZ = vertices.map(v => v.z);
+  targetZ  = [...currentZ];
+  updateStatus();
+
+  document.getElementById('r-slider').addEventListener('input', function () {
+    r  = parseFloat(this.value);
+    // scale outer octagon by r so the construction ratio changes
+    R0 = 220 * r / 0.611;
+    document.getElementById('r-display').textContent = r.toFixed(3);
+    updateStatus();
+
+    currentZ = vertices.map(v => v.z);
+    generateGraph();
+    computeEmbedding();
+    targetZ = vertices.map(v => v.z);
+    for (let i = 0; i < vertices.length; i++) {
+      vertices[i].z = currentZ[i] !== undefined ? currentZ[i] : 0;
+    }
+    transitioning = true;
+  });
+}
+
+function updateStatus() {
+  document.getElementById('status').textContent = r < R_CRIT ? 'BUCKLED' : 'FLAT';
+}
+
+function draw() {
+  background(0);
+  autoAngle += 0.003;
+  rotateX(0.35);
+  rotateY(autoAngle);
+  orbitControl();
+
+  // smooth transition animation
+  if (transitioning) {
+    let done = true;
+    for (let i = 0; i < vertices.length; i++) {
+      if (i < targetZ.length) {
+        vertices[i].z += 0.07 * (targetZ[i] - vertices[i].z);
+        if (Math.abs(targetZ[i] - vertices[i].z) > 0.4) done = false;
+      }
+    }
+    if (done) transitioning = false;
+  }
+
+  // color vertices and edges by z displacement
+  let maxZ = 1;
+  for (let v of vertices) if (Math.abs(v.z) > maxZ) maxZ = Math.abs(v.z);
+
+  // draw edges — warm wood color at rest, blue at high displacement
+  strokeWeight(1.2);
+  noFill();
+  for (let [i, j] of edges) {
+    if (i >= vertices.length || j >= vertices.length) continue;
+    let v1 = vertices[i], v2 = vertices[j];
+    let t  = constrain((Math.abs(v1.z) + Math.abs(v2.z)) * 0.5 / maxZ, 0, 1);
+    stroke(lerp(210, 80,  t), lerp(180, 160, t), lerp(120, 255, t));
+    line(v1.x, v1.y, v1.z, v2.x, v2.y, v2.z);
+  }
+
+  // draw vertex dots
+  noStroke();
+  for (let v of vertices) {
+    let t = constrain(Math.abs(v.z) / maxZ, 0, 1);
+    fill(lerp(210, 80, t), lerp(180, 160, t), lerp(120, 255, t));
+    push();
+    translate(v.x, v.y, v.z);
+    sphere(2.5);
+    pop();
+  }
+}
+
+function windowResized() { resizeCanvas(windowWidth, windowHeight); }
+
+</script>
+</body>
+</html>
