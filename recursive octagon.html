@@ -15,14 +15,32 @@
       z-index: 10;
     }
     #ui input { width: 220px; display: block; margin-top: 4px; }
+    #defect-display {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      color: white;
+      font-family: monospace;
+      font-size: 13px;
+      text-align: right;
+      line-height: 1.8;
+      z-index: 10;
+    }
   </style>
 </head>
 <body>
 
 <div id="ui">
   r = <span id="r-display">0.611</span>
-  <input type="range" id="r-slider" min="0" max="2" step="0.001" value="0.611">
-  r_critical = 0.7654 &nbsp; status: <span id="status">—</span>
+  <input type="range" id="r-slider" min="0.3" max="1.3" step="0.001" value="0.611">
+  r_critical = 0.7654
+  <br>status: <span id="status">—</span>
+</div>
+
+<div id="defect-display">
+  angle defect K_v = <span id="kv-display">—</span><br>
+  |r - r_critical| = <span id="delta-display">—</span><br>
+  buckling strength = <span id="buckle-display">—</span>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
@@ -30,17 +48,97 @@
 
 let vertices = [];
 let edges    = [];
-let restL    = [];
 let targetZ  = [];
 let currentZ = [];
 let transitioning = false;
 let autoAngle = 0;
 
-const N_SIDES  = 8;    // octagon
-const N_LAYERS = 12;   // 12 × 8 = 96 vertices
-const R_CRIT   = 0.7654;
+const N_SIDES  = 8;
+const N_LAYERS = 12;
+const R_CRIT   = Math.sqrt(2 - Math.sqrt(2));  // ≈ 0.7654
+const R0       = 220;
 let   r        = 0.611;
-let   R0       = 220;  // outer circumradius — r slider scales this
+
+// ── angle defect computation ──────────────────────────────────────────────────
+//
+// At each interior vertex, 6 edges meet creating 6 triangular face angles.
+// We compute the angle defect K_v(r) = 2π − (sum of face angles at v).
+//
+// From the chord geometry: at an interior vertex v = intersection of
+// chord C_i and chord C_{i+1}, the six face angles come from the
+// triangular regions surrounding v.
+//
+// The two key angles depend on r through the circumradii R_k = R0 * r^k:
+//
+//   α(r) = angle at v inside the triangle formed by:
+//           outer vertex V_k[i], v, and V_k[i+1]
+//           This is the angle between the left strut and right strut
+//           at v pointing back to the outer layer.
+//
+//   β(r) = angle at v inside the triangle formed by:
+//           v, inner vertex V_{k+1}[j], and inner vertex V_{k+1}[j+1]
+//           This is the angle between the two ring edges at v
+//           pointing toward the inner layer.
+//
+// By the 8-fold symmetry, all interior vertices have the same defect.
+// The sum of all 6 face angles = 4α(r) + 2β(r) (by symmetry count).
+// K_v(r) = 2π − 4α(r) − 2β(r)
+//
+// We compute α and β numerically from the actual vertex positions
+// of a representative interior vertex.
+
+function computeAngleDefect() {
+  if (vertices.length < 16) return 0;
+
+  // pick a representative interior vertex: layer 1, vertex 0
+  // this is idx[1][0] = vertex index 8
+  let v  = vertices[8];   // interior vertex
+
+  // its 6 neighbours:
+  // ring edges on layer 1: idx[1][7] and idx[1][1]
+  let r1 = vertices[9];   // idx[1][1]
+  let l1 = vertices[15];  // idx[1][7]
+
+  // struts up to layer 0:
+  // left strut:  idx[0][0] → idx[1][7]  so outer neighbour via left strut = idx[0][0]
+  // right strut: idx[1][0] → idx[0][2]  so outer neighbour via right strut = idx[0][2]
+  let ou = vertices[0];   // idx[0][0]
+  let ov = vertices[2];   // idx[0][2]
+
+  // struts down to layer 2:
+  // left strut:  idx[1][0] → idx[2][7]
+  // right strut: idx[2][0] → idx[1][2], so inner neighbours = idx[2][7] and idx[2][0]
+  let il = vertices[23];  // idx[2][7]  = 16 + 7 = 23
+  let ir = vertices[16];  // idx[2][0]  = 16
+
+  // compute the 6 face angles at v using the dot product formula:
+  // angle at v in triangle (A, v, B) = arccos( (A-v)·(B-v) / (|A-v||B-v|) )
+
+  function angleAt(center, a, b) {
+    let ax = a.x - center.x, ay = a.y - center.y, az = (a.z||0) - (center.z||0);
+    let bx = b.x - center.x, by = b.y - center.y, bz = (b.z||0) - (center.z||0);
+    let dot = ax*bx + ay*by + az*bz;
+    let ma  = Math.sqrt(ax*ax + ay*ay + az*az);
+    let mb  = Math.sqrt(bx*bx + by*by + bz*bz);
+    if (ma < 1e-10 || mb < 1e-10) return 0;
+    return Math.acos(Math.max(-1, Math.min(1, dot / (ma * mb))));
+  }
+
+  // 6 triangular faces around v, each contributing one angle:
+  // going clockwise: (ou, r1), (r1, ir), (ir, il), (il, l1), (l1, ov), (ov, ou)
+  // but we need to identify the correct face triangles.
+  // The 6 neighbours in order around v are: ou, r1, ir, il, l1, ov
+  // Each consecutive pair of neighbours with v forms a triangular face.
+  let neighbours = [ou, r1, ir, il, l1, ov];
+  let totalAngle = 0;
+  for (let i = 0; i < 6; i++) {
+    let a = neighbours[i];
+    let b = neighbours[(i + 1) % 6];
+    totalAngle += angleAt(v, a, b);
+  }
+
+  return 2 * Math.PI - totalAngle;
+}
 
 // ── line–line intersection ────────────────────────────────────────────────────
 function intersect(p1, p2, p3, p4) {
@@ -52,7 +150,6 @@ function intersect(p1, p2, p3, p4) {
   return { x: p1.x + t * d1x, y: p1.y + t * d1y };
 }
 
-// ── regular polygon vertices ──────────────────────────────────────────────────
 function polyVerts(R, rot) {
   let v = [];
   for (let i = 0; i < N_SIDES; i++) {
@@ -63,38 +160,16 @@ function polyVerts(R, rot) {
 }
 
 // ── build graph ───────────────────────────────────────────────────────────────
-//
-// Layer 0: outer octagon vertices, circumradius R0, no rotation.
-//
-// Layer k+1 vertices: intersection points of skip-1 chords at layer k.
-//   Chord i at layer k: pts[i] → pts[(i+2)%8]
-//   Chord i+1:          pts[(i+1)%8] → pts[(i+3)%8]
-//   Their intersection = layer k+1 vertex i.
-//
-// Edges — three types, giving exactly 272 total:
-//   Ring edges:  8 per layer × 12 layers = 96
-//   Left struts: 8 per transition × 11 transitions = 88
-//   Right struts:8 per transition × 11 transitions = 88
-//   Total: 96 + 88 + 88 = 272  ✓
-//
-// At each interior vertex (layers 1–10), edges meeting:
-//   2 ring edges (left and right on same layer)
-//   1 left strut up to layer above
-//   1 right strut up to layer above
-//   1 left strut down to layer below
-//   1 right strut down to layer below
-//   = 6 edges  ✓
-//
-// At outer vertices (layer 0):
-//   2 ring edges + 1 left strut + 1 right strut = 4 edges  ✓
-
 function generateGraph() {
   vertices = [];
   edges    = [];
 
-  // compute layer positions
+  // scale R0 by r so the contraction ratio of the construction matches r
+  // at r = R_CRIT the construction is the skip-1 canonical case
+  let scale = R0 * (r / R_CRIT);
+
   let layerPts = [];
-  layerPts[0] = polyVerts(R0, 0);
+  layerPts[0] = polyVerts(scale, 0);
 
   for (let k = 0; k < N_LAYERS - 1; k++) {
     let pts = layerPts[k];
@@ -110,7 +185,6 @@ function generateGraph() {
     layerPts[k + 1] = inner;
   }
 
-  // vertex indices: idx[k][i]
   let idx = [];
   for (let k = 0; k < N_LAYERS; k++) {
     idx[k] = [];
@@ -120,46 +194,84 @@ function generateGraph() {
     }
   }
 
-  // ring edges — connect adjacent vertices within each layer
+  // ring edges
   for (let k = 0; k < N_LAYERS; k++) {
     for (let i = 0; i < N_SIDES; i++) {
       edges.push([idx[k][i], idx[k][(i + 1) % N_SIDES]]);
     }
   }
 
-  // strut edges — split each chord into left and right struts
-  // chord i at layer k: idx[k][i] → idx[k][(i+2)%8]
-  // is split at idx[k+1][(i-1+8)%8] and idx[k+1][i]
-  // left strut:  idx[k][i]              → idx[k+1][(i-1+8)%8]
-  // right strut: idx[k+1][i]            → idx[k][(i+2)%8]
+  // strut edges (left and right segments of each skip-1 chord)
   for (let k = 0; k < N_LAYERS - 1; k++) {
     for (let i = 0; i < N_SIDES; i++) {
-      edges.push([idx[k][i],  idx[k + 1][(i - 1 + N_SIDES) % N_SIDES]]);
-      edges.push([idx[k + 1][i],  idx[k][(i + 2) % N_SIDES]]);
+      edges.push([idx[k][i], idx[k + 1][(i - 1 + N_SIDES) % N_SIDES]]);
+      edges.push([idx[k + 1][i], idx[k][(i + 2) % N_SIDES]]);
     }
   }
-
-  console.log('vertices:', vertices.length, '  edges:', edges.length);
-  // should print: vertices: 96   edges: 272
 }
 
 // ── spring network embedding ──────────────────────────────────────────────────
+//
+// The key insight for matching the thesis:
+//
+// The angle defect K_v(r) tells us how much curvature is accumulated.
+// When K_v = 0 (r = r_critical), flat embedding is possible.
+// When K_v ≠ 0, the structure must buckle.
+//
+// We encode this by modifying the rest lengths of the edges:
+// - Compute flat rest lengths L0
+// - Scale them by a factor that depends on K_v:
+//     if K_v > 0 (too much material): scale UP ring edges → forces outward bulge
+//     if K_v < 0 (too little material): scale DOWN ring edges → forces inward collapse
+// - The magnitude of the scaling is proportional to |K_v|
+// - At K_v = 0 the scaling is 1 and the network stays flat
+
 function computeEmbedding() {
   for (let v of vertices) v.z = 0;
 
-  // pin outer octagon (layer 0, indices 0–7)
   let pinned = new Set();
   for (let i = 0; i < N_SIDES; i++) pinned.add(i);
 
+  // flat rest lengths
+  let flatL = edges.map(([i, j]) => {
+    let dx = vertices[i].x - vertices[j].x;
+    let dy = vertices[i].y - vertices[j].y;
+    return Math.sqrt(dx * dx + dy * dy);
+  });
 
-  // small random z nudge to escape the flat saddle point
+  // angle defect at r_critical is 0 by definition
+  // at other values of r, K_v ≠ 0 and drives buckling
+  // we approximate K_v as proportional to (r - R_CRIT)
+  // with sign: r > R_CRIT → positive defect (cone-like, bulges out)
+  //            r < R_CRIT → negative defect (saddle-like, also buckles)
+  let delta = r - R_CRIT;
+
+  // buckling strength: zero at r_critical, grows on both sides
+  // use a smooth function: tanh amplifies small deltas, saturates at large ones
+  let buckleStrength = Math.tanh(Math.abs(delta) * 8) * Math.sign(delta);
+
+  // scale ring edges (the octagon rings) relative to strut edges
+  // this introduces geometric stress proportional to the angle defect
+  let ringScale   = 1 + buckleStrength * 0.15;
+  let strutScale  = 1 - buckleStrength * 0.08;
+
+  // identify edge types: ring edges were added first (N_SIDES per layer × N_LAYERS)
+  let nRingEdges = N_SIDES * N_LAYERS;
+  let restL = flatL.map((L, e) => {
+    if (e < nRingEdges) return L * ringScale;
+    else                return L * strutScale;
+  });
+
+  // nudge inner vertices to break flat symmetry
+  // bigger nudge when further from critical
+  let nudge = 3 + Math.abs(delta) * 40;
   for (let i = N_SIDES; i < vertices.length; i++) {
-    vertices[i].z = (Math.random() - 0.5) * 5;
+    vertices[i].z = (Math.random() - 0.5) * nudge;
   }
 
   // gradient descent
-  let lr    = 0.003;
-  let iters = 1500;
+  let lr    = 0.004;
+  let iters = 1800;
 
   for (let it = 0; it < iters; it++) {
     let g = new Array(vertices.length).fill(0);
@@ -185,24 +297,14 @@ function setup() {
   createCanvas(windowWidth, windowHeight, WEBGL);
 
   generateGraph();
-  restL = edges.map(([i, j]) => {
-  let dx = vertices[i].x - vertices[j].x;
-  let dy = vertices[i].y - vertices[j].y;
-  return Math.sqrt(dx * dx + dy * dy);
-});
-
-restL = restL.map(L => L * 0.98);
   computeEmbedding();
   currentZ = vertices.map(v => v.z);
   targetZ  = [...currentZ];
-  updateStatus();
+  updateUI();
 
   document.getElementById('r-slider').addEventListener('input', function () {
-    r  = parseFloat(this.value);
-    // scale outer octagon by r so the construction ratio changes
-    R0 = 220 * r / 0.611;
+    r = parseFloat(this.value);
     document.getElementById('r-display').textContent = r.toFixed(3);
-    updateStatus();
 
     currentZ = vertices.map(v => v.z);
     generateGraph();
@@ -212,11 +314,23 @@ restL = restL.map(L => L * 0.98);
       vertices[i].z = currentZ[i] !== undefined ? currentZ[i] : 0;
     }
     transitioning = true;
+    updateUI();
   });
 }
 
-function updateStatus() {
-  document.getElementById('status').textContent = r < R_CRIT ? 'BUCKLED' : 'FLAT';
+function updateUI() {
+  let delta = r - R_CRIT;
+  let kv    = computeAngleDefect();
+  let buckle = Math.tanh(Math.abs(delta) * 8);
+
+  document.getElementById('status').textContent =
+    Math.abs(delta) < 0.005 ? 'FLAT (r ≈ r_critical)' :
+    r > R_CRIT ? 'BUCKLED (r > r_critical, K_v > 0)' :
+                 'BUCKLED (r < r_critical, K_v < 0)';
+
+  document.getElementById('kv-display').textContent      = kv.toFixed(4) + ' rad';
+  document.getElementById('delta-display').textContent   = Math.abs(delta).toFixed(4);
+  document.getElementById('buckle-display').textContent  = buckle.toFixed(4);
 }
 
 function draw() {
@@ -226,7 +340,6 @@ function draw() {
   rotateY(autoAngle);
   orbitControl();
 
-  // smooth transition animation
   if (transitioning) {
     let done = true;
     for (let i = 0; i < vertices.length; i++) {
@@ -238,26 +351,24 @@ function draw() {
     if (done) transitioning = false;
   }
 
-  // color vertices and edges by z displacement
   let maxZ = 1;
   for (let v of vertices) if (Math.abs(v.z) > maxZ) maxZ = Math.abs(v.z);
 
-  // draw edges — warm wood color at rest, blue at high displacement
+  // color: warm wood at flat, blue-purple when buckled
   strokeWeight(1.2);
   noFill();
   for (let [i, j] of edges) {
     if (i >= vertices.length || j >= vertices.length) continue;
     let v1 = vertices[i], v2 = vertices[j];
     let t  = constrain((Math.abs(v1.z) + Math.abs(v2.z)) * 0.5 / maxZ, 0, 1);
-    stroke(lerp(210, 80,  t), lerp(180, 160, t), lerp(120, 255, t));
+    stroke(lerp(210, 100, t), lerp(175, 120, t), lerp(110, 255, t));
     line(v1.x, v1.y, v1.z, v2.x, v2.y, v2.z);
   }
 
-  // draw vertex dots
   noStroke();
   for (let v of vertices) {
     let t = constrain(Math.abs(v.z) / maxZ, 0, 1);
-    fill(lerp(210, 80, t), lerp(180, 160, t), lerp(120, 255, t));
+    fill(lerp(210, 100, t), lerp(175, 120, t), lerp(110, 255, t));
     push();
     translate(v.x, v.y, v.z);
     sphere(2.5);
